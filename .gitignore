@@ -1,0 +1,70 @@
+# Python
+*.pyc
+*.pyo
+__pycache__/
+*.pyd
+*.pyc
+
+# Environment
+env/
+venv/
+ENV/
+.venv/
+*.env
+*.venv
+
+# Django
+*.sqlite3
+db.sqlite3
+/media
+/staticfiles
+/static/
+
+# VSCode
+.vscode/
+
+# macOS
+.DS_Store
+
+# PyCharm
+.idea/
+
+# Logs
+*.log
+
+# Byte-compiled / optimized / DLL files
+*.py[cod]
+*$py.class
+
+# Coverage reports
+htmlcov/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints
+
+# pipenv
+Pipfile.lock
+
+# mypy
+.mypy_cache/
+
+# pyre
+.pyre/
+
+# pytest
+.pytest_cache/
+
+# celery beat schedule files
+celerybeat-schedule
+
+# Django migrations
+*/migrations/*.py
+!*/migrations/__init__.py
