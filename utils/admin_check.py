@@ -2,9 +2,11 @@
 from database import async_session
 from models import Admin
 from sqlalchemy import select
+from config import ADMIN_IDS
+
 
 async def is_admin(user_id: int) -> bool:
-    if user_id==5306481482:
+    if user_id in ADMIN_IDS:
         return True
     async with async_session() as session:
         result = await session.execute(
@@ -13,7 +15,7 @@ async def is_admin(user_id: int) -> bool:
         return result.scalar_one_or_none() is not None
 
 async def get_role(user_id: int) -> str:
-    if user_id==5306481482:
+    if user_id in ADMIN_IDS:
         return "superadmin"
     async with async_session() as session:
         result = await session.execute(

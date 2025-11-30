@@ -4,9 +4,9 @@ from aiogram.types import Message, CallbackQuery, FSInputFile
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from database import async_session
-from models import User, Admin,QRLog
+from models import User, Admin,QRLog,AttendanceLog
 from utils.admin_check import is_admin, get_role
-from utils.misc import generate_qr, create_excel
+from utils.misc import generate_qr, create_excel,export_attendance_excel
 from admin.keyboards import admin_main_keyboard, back_button, admin_list_keyboard
 from sqlalchemy import select, func, delete
 from datetime import datetime, date
@@ -92,6 +92,21 @@ async def admin_export(call: CallbackQuery):
     await call.message.answer_document(
         FSInputFile(file_path),
         caption=f"Foydalanuvchilar soni: {len(users)}"
+    )
+    os.remove(file_path)
+
+@router.callback_query(F.data == "admin_export_2")
+async def admin_export(call: CallbackQuery):
+    role = await get_role(call.from_user.id)
+    if role not in ("admin", "superadmin"):
+        return await call.answer("Sizda ruxsat yo'q!", show_alert=True)
+
+    file_path = await export_attendance_excel(async_session)
+
+    await call.message.delete()
+    await call.message.answer_document(
+        FSInputFile(file_path),
+        caption="Attendance ro'yxati"
     )
     os.remove(file_path)
 

@@ -10,7 +10,8 @@ def admin_main_keyboard(role: str) -> InlineKeyboardMarkup:
         kb.append([InlineKeyboardButton(text="Statistika", callback_data="admin_stats")])
 
     if role in ("admin", "superadmin","analyst"):
-        kb.append([InlineKeyboardButton(text="Excel eksport", callback_data="admin_export")])
+        kb.append([InlineKeyboardButton(text="Foydalanuvchilar", callback_data="admin_export")])
+        kb.append([InlineKeyboardButton(text="Davomat", callback_data="admin_export_2")])
 
     if role in ("smm", "superadmin"):
         kb.append([InlineKeyboardButton(text="Broadcast", callback_data="admin_broadcast")])
