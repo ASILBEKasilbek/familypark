@@ -8,16 +8,21 @@ from models import User, Admin,QRLog,AttendanceLog
 from utils.admin_check import is_admin, get_role
 from utils.misc import generate_qr, create_excel,export_attendance_excel
 from admin.keyboards import admin_main_keyboard, back_button, admin_list_keyboard
-from sqlalchemy import select, func, delete
-from datetime import datetime, date
+from sqlalchemy import select, func, delete, cast, String, or_
+from datetime import datetime, date, timedelta
 import os
 import asyncio
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineQuery
+
+
+
 router = Router()
 
 # States
 class AdminStates(StatesGroup):
     broadcast = State()
+    broadcast_message = State()
     qr_key = State()
     cashier_search = State()
 
@@ -25,6 +30,84 @@ class SuperAdminStates(StatesGroup):
     waiting_admin_id = State()
     waiting_admin_role = State()
     waiting_remove_admin = State()
+
+
+def _personalized_block(first_name, base_text: str) -> str:
+    name = first_name or "do'stimiz"
+    greeting = f"👋 Salom, {name}!"
+    return f"{greeting}\n\n{base_text}" if base_text else greeting
+
+
+async def _resolve_accessible_places(session, admin_record):
+    if admin_record and admin_record.role == "cashier" and admin_record.place:
+        return [admin_record.place]
+    result = await session.execute(select(QRLog.source_key))
+    return [row[0] for row in result.all()]
+
+
+async def _mark_attendance(session, user, place: str, marker_id: int) -> datetime:
+    now = datetime.utcnow()
+    log = AttendanceLog(
+        user_id=user.telegram_id,
+        place=place,
+        marked_by=marker_id
+    )
+    user.attended = True
+    user.attended_date = now
+    session.add(log)
+    await session.commit()
+    return now
+
+
+async def _notify_attendance(bot, user, place: str, marked_at: datetime):
+    formatted_time = marked_at.strftime("%Y-%m-%d %H:%M:%S")
+    await bot.send_message(
+        chat_id=user.telegram_id,
+        text=(
+            f"👋 Salom, {user.first_name}!\n\n"
+            f"✅ Siz muvaffaqiyatli ravishda quyidagi joyga keldingiz:\n"
+            f"🏢 Joy: <b>{place}</b>\n"
+            f"🕒 Vaqt: <b>{formatted_time}</b>\n\n"
+            f"Rahmat!"
+        ),
+        parse_mode="HTML"
+    )
+
+
+def _broadcast_target_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Hamma", callback_data="broadcast_target:all")],
+            [InlineKeyboardButton(text="Faqat erkaklar", callback_data="broadcast_target:male")],
+            [InlineKeyboardButton(text="Faqat ayollar", callback_data="broadcast_target:female")],
+            [InlineKeyboardButton(text="Orqaga", callback_data="admin_main")]
+        ]
+    )
+
+
+async def _find_user_by_identifier(session, identifier: str):
+    value = identifier.strip()
+    user = None
+
+    if value.startswith("@"):
+        username = value[1:]
+        if username:
+            user = await session.scalar(
+                select(User).where(func.lower(User.username) == username.lower())
+            )
+
+    if user is None and value.isdigit():
+        numeric_value = int(value)
+        user = await session.scalar(select(User).where(User.telegram_id == numeric_value))
+        if user is None:
+            user = await session.scalar(select(User).where(User.id == numeric_value))
+
+    if user is None:
+        digits = "".join(ch for ch in value if ch.isdigit())
+        if digits:
+            user = await session.scalar(select(User).where(User.phone == digits))
+
+    return user
 
 
 # ====================== ADMIN PANEL KIRISH ======================
@@ -111,6 +194,48 @@ async def admin_export(call: CallbackQuery):
     os.remove(file_path)
 
 
+@router.callback_query(F.data == "cashier_report")
+async def cashier_report(call: CallbackQuery):
+    role = await get_role(call.from_user.id)
+    if role not in ("admin", "superadmin", "analyst"):
+        return await call.answer("Sizda ruxsat yo'q!", show_alert=True)
+
+    today = datetime.utcnow().date()
+    period_start = today.replace(day=1)
+    next_month = (period_start + timedelta(days=32)).replace(day=1)
+    start_dt = datetime.combine(period_start, datetime.min.time())
+    end_dt = datetime.combine(next_month, datetime.min.time())
+
+    async with async_session() as session:
+        result = await session.execute(
+            select(
+                AttendanceLog.marked_by,
+                func.count(AttendanceLog.id).label("total"),
+                Admin.full_name,
+                Admin.place
+            )
+            .join(Admin, Admin.telegram_id == AttendanceLog.marked_by, isouter=True)
+            .where(AttendanceLog.marked_at >= start_dt, AttendanceLog.marked_at < end_dt)
+            .group_by(AttendanceLog.marked_by, Admin.full_name, Admin.place)
+            .order_by(func.count(AttendanceLog.id).desc())
+        )
+        rows = result.all()
+
+    if not rows:
+        return await call.answer("Bu oyda hali ma'lumot yo'q.", show_alert=True)
+
+    month_label = period_start.strftime("%B %Y")
+    text = [f"<b>{month_label}</b> bo'yicha kassirlar hisobot:"]
+    for idx, row in enumerate(rows, 1):
+        marked_by, total, full_name, place = row
+        name = full_name or "Ism kiritilmagan"
+        place_part = f" | Joy: {place}" if place else ""
+        text.append(f"{idx}. {name} ({marked_by}) — {total} ta{place_part}")
+
+    text.append("\nHisobot hozirgi oyni qamrab oladi.")
+    await call.message.edit_text("\n".join(text), reply_markup=back_button())
+
+
 # ====================== BROADCAST (SMM + SuperAdmin) ======================
 @router.callback_query(F.data == "admin_broadcast")
 async def broadcast_start(call: CallbackQuery, state: FSMContext):
@@ -119,29 +244,64 @@ async def broadcast_start(call: CallbackQuery, state: FSMContext):
         return await call.answer("Faqat SMM va SuperAdmin yubora oladi!", show_alert=True)
 
     await call.message.edit_text(
-        "Reklama xabarini yuboring (foto, video, matn):",
-        reply_markup=back_button()
+        "Xabar kimlarga yuboriladi?",
+        reply_markup=_broadcast_target_keyboard()
     )
     await state.set_state(AdminStates.broadcast)
 
 
-@router.message(AdminStates.broadcast)
+@router.callback_query(AdminStates.broadcast, F.data.startswith("broadcast_target:"))
+async def broadcast_target_selected(call: CallbackQuery, state: FSMContext):
+    target = call.data.split(":")[1]
+    await state.update_data(broadcast_target=target)
+    await call.message.edit_text(
+        "Reklama xabarini yuboring (foto, video, matn):",
+        reply_markup=back_button()
+    )
+    await state.set_state(AdminStates.broadcast_message)
+
+
+@router.message(AdminStates.broadcast_message)
 async def broadcast_send(message: Message, state: FSMContext):
+    data = await state.get_data()
+    target = data.get("broadcast_target", "all")
+
     async with async_session() as session:
-        result = await session.execute(select(User.telegram_id))
-        user_ids = [row[0] for row in result.all()]
+        stmt = select(User.telegram_id, User.first_name)
+        if target in ("male", "female"):
+            stmt = stmt.where(User.gender == target)
+        result = await session.execute(stmt)
+        receivers = result.all()
+
+    if not receivers:
+        await message.answer("Tanlangan toifadagi foydalanuvchilar topilmadi.")
+        await state.clear()
+        return
 
     sent = 0
     blocked = 0
-    for uid in user_ids:
+    for uid, first_name in receivers:
         try:
-            await message.copy_to(uid)
+            if message.content_type == "text":
+                base_text = message.html_text or message.text or ""
+                text = _personalized_block(first_name, base_text)
+                await message.bot.send_message(uid, text, parse_mode="HTML")
+            else:
+                base_caption = message.html_caption or message.caption or ""
+                caption = _personalized_block(first_name, base_caption)
+                await message.copy_to(uid, caption=caption, parse_mode="HTML")
             sent += 1
-            await asyncio.sleep(0.05)
-        except:
+        except Exception:
             blocked += 1
+        await asyncio.sleep(0.05)
 
-    await message.answer(f"Yuborildi: {sent} ta\nBloklagan: {blocked} ta")
+    target_label = {
+        "all": "Hamma",
+        "male": "Erkaklar",
+        "female": "Ayollar"
+    }.get(target, target)
+
+    await message.answer(f"Yuborildi: {sent} ta\nBloklagan: {blocked} ta\nSegment: {target_label}")
     await state.clear()
 
 
@@ -198,17 +358,11 @@ async def qr_generate(message: Message, state: FSMContext):
 
 
 # ====================== DAVOMAT (Cashier + Admin + SuperAdmin) ======================
-from aiogram.types import InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from aiogram import F
-from sqlalchemy import select, or_, func
-from datetime import date, datetime
-from models import User, QRLog, AttendanceLog
-from database import async_session  # o'z sessioning
-from aiogram.fsm.context import FSMContext
-from aiogram.types import InlineQuery
+
 # Admin kassir paneli
 @router.callback_query(F.data == "admin_cashier")
-async def cashier_start(call: CallbackQuery):
+async def cashier_start(call: CallbackQuery, state: FSMContext):
+    await state.clear()
     role = await get_role(call.from_user.id)
     if role not in ("cashier", "admin", "superadmin"):
         return await call.answer("Faqat kassirlar ishlatadi!", show_alert=True)
@@ -216,6 +370,7 @@ async def cashier_start(call: CallbackQuery):
     keyboards = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Qidirish", switch_inline_query_current_chat="")],
+            [InlineKeyboardButton(text="ID orqali belgilash", callback_data="admin_attend_id")],
             [InlineKeyboardButton(text="Orqaga", callback_data="admin_main")]
         ]
     )
@@ -229,6 +384,14 @@ async def cashier_start(call: CallbackQuery):
 
 @router.inline_query(F.query.regexp(r"^\d{3,}|^@|^[a-zA-Z]"))
 async def inline_search_users(inline_query: InlineQuery):
+    if not await is_admin(inline_query.from_user.id):
+        return await inline_query.answer(
+            results=[],
+            switch_pm_text="HA ha qiziqishga yozib kurdizmi admin emaskusiz!",
+            switch_pm_parameter="no_access",  
+            cache_time=1
+        )
+
     query = inline_query.query.strip().lstrip("@")
     if len(query) < 2:
         return
@@ -237,36 +400,25 @@ async def inline_search_users(inline_query: InlineQuery):
         result = await session.execute(
             select(User).where(
                 or_(
-                    User.phone.ilike(f"%{query}%"),
-                    User.username.ilike(f"%{query}%"),
+                    cast(User.phone, String).ilike(f"%{query}%"),
+                    cast(User.telegram_id, String).ilike(f"%{query}%"),
                     User.first_name.ilike(f"%{query}%")
                 )
             ).limit(20)
         )
         users = result.scalars().all()
-        qr_result = await session.execute(select(QRLog))
         admin = await session.scalar(
             select(Admin).where(Admin.telegram_id == inline_query.from_user.id)
         )
-        admin_role = admin.role if admin else "superadmin"
-
-        if admin_role == "cashier":
-            qr_places = [admin.place]
-        else:
-            qr_places = [row.source_key for row in qr_result.scalars().all()]
+        qr_places = await _resolve_accessible_places(session, admin)
+        if not qr_places:
+            qr_places = ["main"]
 
     results = []
     for user in users:
         text = f"<b>{user.first_name}</b>\nTelefon: {user.phone}\n"
         if user.username:
             text += f"Username: @{user.username}\n"
-
-        buttons = [[
-            InlineKeyboardButton(
-                text=f"Kelgan — {place}",
-                callback_data=f"mark_attend:{user.telegram_id}:{place}"
-            )
-        ] for place in qr_places]
 
         results.append(InlineQueryResultArticle(
             id=str(user.id),
@@ -287,9 +439,92 @@ async def inline_search_users(inline_query: InlineQuery):
             )
         ))
 
-
-
     await inline_query.answer(results, cache_time=1)
+
+
+@router.callback_query(F.data == "admin_attend_id")
+async def attend_by_id_start(call: CallbackQuery, state: FSMContext):
+    if not await is_admin(call.from_user.id):
+        return await call.answer("Ruxsat yo'q!", show_alert=True)
+
+    async with async_session() as session:
+        admin = await session.scalar(select(Admin).where(Admin.telegram_id == call.from_user.id))
+        places = await _resolve_accessible_places(session, admin)
+
+    if not places:
+        return await call.answer("Avval QR joylarini yarating!", show_alert=True)
+
+    await state.update_data(attend_places=places)
+    await call.message.edit_text(
+        "Foydalanuvchining Telegram ID, telefon raqami yoki username ni yuboring:",
+        reply_markup=back_button("admin_cashier")
+    )
+    await state.set_state(AdminStates.cashier_search)
+
+
+@router.message(AdminStates.cashier_search)
+async def attend_by_id_lookup(message: Message, state: FSMContext):
+    identifier = message.text.strip()
+    marked_at = None
+    place_used = None
+
+    async with async_session() as session:
+        user = await _find_user_by_identifier(session, identifier)
+        if not user:
+            await message.answer("Foydalanuvchi topilmadi. Qaytadan urinib ko'ring.")
+            return
+
+        data = await state.get_data()
+        places = data.get("attend_places") or []
+        if not places:
+            admin = await session.scalar(select(Admin).where(Admin.telegram_id == message.from_user.id))
+            places = await _resolve_accessible_places(session, admin)
+            await state.update_data(attend_places=places)
+
+        if not places:
+            await message.answer("Sizga joy biriktirilmagan. SuperAdmin bilan bog'laning.")
+            return
+
+        if len(places) == 1:
+            place_used = places[0]
+            marked_at = await _mark_attendance(session, user, place_used, message.from_user.id)
+            await message.answer(f"{user.first_name} uchun {place_used} joyi belgilandi.")
+        else:
+            buttons = [
+                [InlineKeyboardButton(text=place, callback_data=f"attend_place:{user.telegram_id}:{place}")]
+                for place in places
+            ]
+            await message.answer(
+                "Qaysi joyda belgilaymiz?",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+            )
+            return
+
+    if marked_at and place_used:
+        await _notify_attendance(message.bot, user, place_used, marked_at)
+
+
+@router.callback_query(F.data.startswith("attend_place:"))
+async def attend_place_callback(call: CallbackQuery):
+    _, user_tg_id, place = call.data.split(":", 2)
+    user_tg_id = int(user_tg_id)
+
+    async with async_session() as session:
+        admin = await session.scalar(select(Admin).where(Admin.telegram_id == call.from_user.id))
+        places = await _resolve_accessible_places(session, admin)
+        if place not in places:
+            return await call.answer("Bu joy sizga biriktirilmagan!", show_alert=True)
+
+        result = await session.execute(select(User).where(User.telegram_id == user_tg_id))
+        user = result.scalar_one_or_none()
+        if not user:
+            return await call.answer("Foydalanuvchi topilmadi", show_alert=True)
+
+        marked_at = await _mark_attendance(session, user, place, call.from_user.id)
+
+    await call.answer("Belgilandi ✔️", show_alert=True)
+    await _notify_attendance(call.bot, user, place, marked_at)
+
 
 @router.callback_query(F.data.startswith("confirm_attend:"))
 async def confirm_attend(call: CallbackQuery):
@@ -297,31 +532,21 @@ async def confirm_attend(call: CallbackQuery):
     user_tg_id = int(user_tg_id)
 
     async with async_session() as session:
-
         result = await session.execute(select(User).where(User.telegram_id == user_tg_id))
         user = result.scalar_one_or_none()
 
         if not user:
             return await call.answer("Foydalanuvchi topilmadi", show_alert=True)
-
-        log = AttendanceLog(
-            user_id=user.telegram_id,
-            place=place,
-            marked_by=call.from_user.id
-        )
-
-        user.attended = True
-        user.attended_date = datetime.utcnow()
-
-        session.add(log)
-        await session.commit()
-
+        marked_at = await _mark_attendance(session, user, place, call.from_user.id)
+    
     await call.answer("Belgilandi ✔️", show_alert=True)
+    await _notify_attendance(call.bot, user, place, marked_at)
 
 
 @router.callback_query(F.data == "cancel_attend")
 async def cancel_attend(call: CallbackQuery):
     await call.answer("Bekor qilindi ❌", show_alert=True)
+
 
 # ====================== SUPERADMIN: ADMINLAR BOSHQARUVI ======================
 @router.callback_query(F.data == "manage_admins")

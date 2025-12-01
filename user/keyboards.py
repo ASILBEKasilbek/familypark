@@ -19,3 +19,13 @@ def phone_keyboard():
         resize_keyboard=True,
         one_time_keyboard=True
     )
+
+
+def gender_keyboard():
+    male = KeyboardButton(text="Erkak")
+    female = KeyboardButton(text="Ayol")
+    return ReplyKeyboardMarkup(
+        keyboard=[[male, female]],
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )

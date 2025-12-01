@@ -1,5 +1,5 @@
 # models.py
-from sqlalchemy import Column, Integer, BigInteger, String, DateTime, Boolean, Text
+from sqlalchemy import Column, Integer, BigInteger, String, DateTime, Boolean, Text, Date
 from sqlalchemy.sql import func
 from database import Base
 from datetime import datetime
@@ -13,6 +13,8 @@ class User(Base):
     username = Column(String(100))
     phone = Column(String(20), nullable=False)
     source = Column(String(100), nullable=False)
+    birth_date = Column(Date, nullable=True)
+    gender = Column(String(10), nullable=True)
     profile_photo = Column(Text)
     registered_at = Column(DateTime(timezone=True), server_default=func.now())
     attended = Column(Boolean, default=False)

@@ -11,7 +11,8 @@ from sqlalchemy import select
 import os
 
 router = Router()
-CHANNEL_ID = int(os.getenv("CHANNEL_ID", 0))  # .env da CHANNEL_ID borligiga ishonch hosil qiling
+CHANNEL_ID = int(os.getenv("CHANNEL_ID", 0)) 
+
 
 class UserStates(StatesGroup):
     waiting_phone = State()
@@ -60,11 +61,15 @@ async def cmd_start(message: Message, state: FSMContext, command=None):
 @router.callback_query(F.data == "check_sub")
 async def check_subscription(call: CallbackQuery, state: FSMContext):
     try:
+
         member = await call.bot.get_chat_member(CHANNEL_ID, call.from_user.id)
+        
         if member.status not in ("member", "administrator", "creator"):
             await call.answer("Siz hali kanalga obuna bo‘lmadingiz!", show_alert=True)
             return
+        
     except Exception:
+
         await call.answer("Obuna tekshirishda xatolik yuz berdi.", show_alert=True)
         return
 
@@ -108,10 +113,24 @@ async def save_contact(message: Message, state: FSMContext):
 # Boshqa xabarlar uchun
 @router.message()
 async def any_message(message: Message):
-    # ❗ Agar cashier confirm modalini olgan bo‘lsa – bu handler ishlamasligi kerak
     if message.via_bot:
         return
-
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Profilim", callback_data="profile")]])
     await message.answer(
-        "Iltimos, /start buyrug‘ini bosing yoki QR orqali kirib keling."
+        "Assalomu alaykum! FamilyParkga xush kelibsiz!\n\n",reply_markup=kb
     )
+
+@router.callback_query(F.data == "profile")
+async def check_subscription(call: CallbackQuery, state: FSMContext):
+    async with async_session() as session:
+        result = await session.execute(
+            select(User).where(User.telegram_id == call.from_user.id)
+        )
+        user = result.scalar_one_or_none()
+        if not user:
+            await call.message.answer("Siz ro‘yxatdan o‘tmagansiz!\n\n Faqat Family Park orqali ro'yxatdan o'ting", show_alert=True)
+            return
+    print(user.telegram_id,user.first_name)
+    await call.message.answer(f"Sizning profilingiz:\n\nTelegram ID: {user.telegram_id}\nIsmingiz: {user.first_name}\nUsername: @{user.username}\nTelefon raqamingiz: {user.phone}")
+    

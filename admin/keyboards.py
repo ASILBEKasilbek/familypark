@@ -22,6 +22,9 @@ def admin_main_keyboard(role: str) -> InlineKeyboardMarkup:
     if role in ("cashier", "admin", "superadmin"):
         kb.append([InlineKeyboardButton(text="Kelganlarni belgilash", callback_data="admin_cashier")])
 
+    if role in ("admin", "superadmin", "analyst"):
+        kb.append([InlineKeyboardButton(text="Kassir hisobot", callback_data="cashier_report")])
+
     if role == "superadmin":
         kb.append([InlineKeyboardButton(text="Adminlar boshqaruvi", callback_data="manage_admins")])
 
